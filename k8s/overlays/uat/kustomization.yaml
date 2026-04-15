@@ -4,16 +4,17 @@ kind: Kustomization
 namespace: multi-env-uat
 
 resources:
-  - ../../base
+- ../../base
 
 patches:
-  - path: service-patch.yaml
+- path: service-patch.yaml
 
 configMapGenerator:
-  - name: multi-env-api-env
-    literals:
-      - ENVIRONMENT=uat
+- literals:
+  - ENVIRONMENT=uat
+  name: multi-env-api-env
 
 images:
-  - name: apinizeren/multi-env
-    newTag: latest
+- name: apinizeren/multi-env
+  newName: apinizeren/multi-env
+  newTag: v0.0.9
