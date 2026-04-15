@@ -1,4 +1,6 @@
 // CD pipeline: deploy dev → test → uat → prod with Apinizer sync and smoke tests.
+// Each deploy stage updates kustomization.yaml in Git with [skip ci] to keep
+// Git state in sync with the cluster without triggering a new CI run.
 // Shared library functions (retryWithDelay, apinizerProxySync, apinizerPromoteProd, smokeTest) must be
 // configured under Jenkins → Manage Jenkins → Global Pipeline Libraries.
 
@@ -35,6 +37,9 @@ pipeline {
         OPENAPI_URL_UAT   = "http://${NODE_IP}:${UAT_NODE_PORT}/openapi.json"
         OPENAPI_URL_PROD  = "http://${NODE_IP}:${PROD_NODE_PORT}/openapi.json"
 
+        GIT_REPO_URL      = 'https://github.com/erencvz/multi-env.git'
+        GIT_CREDENTIALS   = 'github-credentials'
+
         RETRY_COUNT       = '3'
         RETRY_DELAY_SEC   = '15'
     }
@@ -62,13 +67,21 @@ pipeline {
 
         stage('Deploy Dev') {
             steps {
-                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
+                withCredentials([
+                    file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG'),
+                    usernamePassword(credentialsId: env.GIT_CREDENTIALS, usernameVariable: 'GIT_USER', passwordVariable: 'GIT_TOKEN')
+                ]) {
                     sh """
                         export KUBECONFIG=\$KUBECONFIG
                         cd k8s/overlays/dev
                         kustomize edit set image ${IMAGE_BASE}=${IMAGE_BASE}:${params.VERSION_TAG}
                         kubectl apply -k .
                         kubectl rollout status deployment/multi-env-api -n multi-env-dev --timeout=120s
+                        git config user.email "jenkins@ci"
+                        git config user.name "Jenkins"
+                        git add kustomization.yaml
+                        git diff --cached --quiet || git commit -m "chore: set dev image to ${params.VERSION_TAG} [skip ci]"
+                        git push https://\${GIT_USER}:\${GIT_TOKEN}@${GIT_REPO_URL.replace('https://', '')} HEAD:main
                     """
                 }
             }
@@ -121,13 +134,21 @@ pipeline {
 
         stage('Deploy Test') {
             steps {
-                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
+                withCredentials([
+                    file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG'),
+                    usernamePassword(credentialsId: env.GIT_CREDENTIALS, usernameVariable: 'GIT_USER', passwordVariable: 'GIT_TOKEN')
+                ]) {
                     sh """
                         export KUBECONFIG=\$KUBECONFIG
                         cd k8s/overlays/test
                         kustomize edit set image ${IMAGE_BASE}=${IMAGE_BASE}:${params.VERSION_TAG}
                         kubectl apply -k .
                         kubectl rollout status deployment/multi-env-api -n multi-env-test --timeout=120s
+                        git config user.email "jenkins@ci"
+                        git config user.name "Jenkins"
+                        git add kustomization.yaml
+                        git diff --cached --quiet || git commit -m "chore: set test image to ${params.VERSION_TAG} [skip ci]"
+                        git push https://\${GIT_USER}:\${GIT_TOKEN}@${GIT_REPO_URL.replace('https://', '')} HEAD:main
                     """
                 }
             }
@@ -180,13 +201,21 @@ pipeline {
 
         stage('Deploy UAT') {
             steps {
-                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
+                withCredentials([
+                    file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG'),
+                    usernamePassword(credentialsId: env.GIT_CREDENTIALS, usernameVariable: 'GIT_USER', passwordVariable: 'GIT_TOKEN')
+                ]) {
                     sh """
                         export KUBECONFIG=\$KUBECONFIG
                         cd k8s/overlays/uat
                         kustomize edit set image ${IMAGE_BASE}=${IMAGE_BASE}:${params.VERSION_TAG}
                         kubectl apply -k .
                         kubectl rollout status deployment/multi-env-api -n multi-env-uat --timeout=120s
+                        git config user.email "jenkins@ci"
+                        git config user.name "Jenkins"
+                        git add kustomization.yaml
+                        git diff --cached --quiet || git commit -m "chore: set uat image to ${params.VERSION_TAG} [skip ci]"
+                        git push https://\${GIT_USER}:\${GIT_TOKEN}@${GIT_REPO_URL.replace('https://', '')} HEAD:main
                     """
                 }
             }
@@ -239,13 +268,21 @@ pipeline {
 
         stage('Deploy Prod') {
             steps {
-                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
+                withCredentials([
+                    file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG'),
+                    usernamePassword(credentialsId: env.GIT_CREDENTIALS, usernameVariable: 'GIT_USER', passwordVariable: 'GIT_TOKEN')
+                ]) {
                     sh """
                         export KUBECONFIG=\$KUBECONFIG
                         cd k8s/overlays/prod
                         kustomize edit set image ${IMAGE_BASE}=${IMAGE_BASE}:${params.VERSION_TAG}
                         kubectl apply -k .
                         kubectl rollout status deployment/multi-env-api -n multi-env-prod --timeout=120s
+                        git config user.email "jenkins@ci"
+                        git config user.name "Jenkins"
+                        git add kustomization.yaml
+                        git diff --cached --quiet || git commit -m "chore: set prod image to ${params.VERSION_TAG} [skip ci]"
+                        git push https://\${GIT_USER}:\${GIT_TOKEN}@${GIT_REPO_URL.replace('https://', '')} HEAD:main
                     """
                 }
             }
