@@ -17,4 +17,4 @@ configMapGenerator:
 images:
 - name: apinizeren/multi-env
   newName: apinizeren/multi-env
-  newTag: v0.0.8
+  newTag: v0.0.9
