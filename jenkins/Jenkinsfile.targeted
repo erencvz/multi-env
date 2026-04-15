@@ -1,0 +1,189 @@
+// Targeted deploy pipeline: deploys a specific version to a single environment.
+// Includes automatic Kubernetes rollback on failure. Git commit uses [skip ci]
+// to prevent GitHub Actions from triggering a new CI run.
+// Shared library functions (retryWithDelay, apinizerProxySync, smokeTest) must be
+// configured under Jenkins → Manage Jenkins → Global Pipeline Libraries.
+
+pipeline {
+    agent any
+
+    environment {
+        IMAGE_BASE        = 'apinizeren/multi-env'
+        NODE_IP           = '167.86.118.166'
+        DEV_NODE_PORT     = '30221'
+        TEST_NODE_PORT    = '30222'
+        UAT_NODE_PORT     = '30223'
+        PROD_NODE_PORT    = '30224'
+
+        APINIZER_URL      = credentials('apinizer-management-url')
+        APINIZER_TOKEN    = credentials('APINIZER_DEMO_TOKEN')
+        PROXY_NAME        = 'multi-env'
+
+        PROJECT_NAME_DEV  = 'dev-project'
+        PROJECT_NAME_TEST = 'test-project'
+        PROJECT_NAME_UAT  = 'uat-project'
+        PROJECT_NAME_PROD = 'prod-project'
+
+        GIT_REPO_URL      = 'https://github.com/erencvz/multi-env.git'
+        GIT_CREDENTIALS   = 'github-credentials'
+
+        RETRY_COUNT       = '3'
+        RETRY_DELAY_SEC   = '15'
+    }
+
+    stages {
+
+        stage('Validate') {
+            steps {
+                script {
+                    if (!params.VERSION_TAG?.trim()) {
+                        error('VERSION_TAG parameter is empty.')
+                    }
+                    if (!params.ENVIRONMENT?.trim()) {
+                        error('ENVIRONMENT parameter is empty.')
+                    }
+
+                    echo "Target environment : ${params.ENVIRONMENT}"
+                    echo "Target version     : ${params.VERSION_TAG}"
+
+                    def checkUrl = "https://hub.docker.com/v2/repositories/${IMAGE_BASE}/tags/${params.VERSION_TAG}/"
+                    def status = sh(
+                        script: "curl -s -o /dev/null -w '%{http_code}' '${checkUrl}'",
+                        returnStdout: true
+                    ).trim()
+                    if (status != '200') {
+                        error("VERSION_TAG '${params.VERSION_TAG}' not found on Docker Hub (HTTP ${status}).")
+                    }
+                    echo "Tag verified on Docker Hub: ${params.VERSION_TAG}"
+                }
+            }
+            post {
+                failure { echo "Validation failed — pipeline stopped before any changes were made." }
+            }
+        }
+
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Update Git') {
+            steps {
+                script {
+                    sh """
+                        cd k8s/overlays/${params.ENVIRONMENT}
+                        kustomize edit set image ${IMAGE_BASE}=${IMAGE_BASE}:${params.VERSION_TAG}
+                    """
+                    sh """
+                        git config user.email "jenkins@ci"
+                        git config user.name "Jenkins"
+                        git add k8s/overlays/${params.ENVIRONMENT}/kustomization.yaml
+                        git diff --cached --quiet || git commit -m "chore: set ${params.ENVIRONMENT} image to ${params.VERSION_TAG} [skip ci]"
+                    """
+                    withCredentials([usernamePassword(
+                        credentialsId: env.GIT_CREDENTIALS,
+                        usernameVariable: 'GIT_USER',
+                        passwordVariable: 'GIT_TOKEN'
+                    )]) {
+                        sh "git push https://\${GIT_USER}:\${GIT_TOKEN}@${GIT_REPO_URL.replace('https://', '')} HEAD:main"
+                    }
+                }
+            }
+            post {
+                failure { echo "Git update failed — deploy cancelled before any cluster changes were made." }
+            }
+        }
+
+        stage('Deploy') {
+            steps {
+                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
+                    script {
+                        def namespace = "multi-env-${params.ENVIRONMENT}"
+                        try {
+                            sh """
+                                export KUBECONFIG=\$KUBECONFIG
+                                cd k8s/overlays/${params.ENVIRONMENT}
+                                kubectl apply -k .
+                                kubectl rollout status deployment/multi-env-api \
+                                    -n ${namespace} \
+                                    --timeout=120s
+                            """
+                        } catch (Exception e) {
+                            echo "Rollout failed — initiating automatic rollback..."
+                            sh """
+                                export KUBECONFIG=\$KUBECONFIG
+                                kubectl rollout undo deployment/multi-env-api -n ${namespace}
+                            """
+                            error("Deploy failed for version ${params.VERSION_TAG} in ${params.ENVIRONMENT}. Kubernetes rolled back to previous version. Apinizer was not updated.")
+                        }
+                    }
+                }
+            }
+            post {
+                failure { echo "Deploy failed — Kubernetes rollback was applied, Apinizer was not touched." }
+            }
+        }
+
+        stage('Apinizer Sync') {
+            steps {
+                script {
+                    def portMap = [
+                        dev : env.DEV_NODE_PORT,
+                        test: env.TEST_NODE_PORT,
+                        uat : env.UAT_NODE_PORT,
+                        prod: env.PROD_NODE_PORT
+                    ]
+                    def projectMap = [
+                        dev : env.PROJECT_NAME_DEV,
+                        test: env.PROJECT_NAME_TEST,
+                        uat : env.PROJECT_NAME_UAT,
+                        prod: env.PROJECT_NAME_PROD
+                    ]
+                    def port       = portMap[params.ENVIRONMENT]
+                    def project    = projectMap[params.ENVIRONMENT]
+                    def openApiUrl = "http://${NODE_IP}:${port}/openapi.json"
+
+                    retryWithDelay(env.RETRY_COUNT.toInteger(), env.RETRY_DELAY_SEC.toInteger(), 'Apinizer Sync') {
+                        apinizerProxySync(
+                            proxyName:   env.PROXY_NAME,
+                            projectName: project,
+                            openApiUrl:  openApiUrl,
+                            environment: params.ENVIRONMENT,
+                            versionTag:  params.VERSION_TAG
+                        )
+                    }
+                }
+            }
+            post {
+                failure { echo "Apinizer Sync failed — proxy may be out of sync with deployed version ${params.VERSION_TAG}." }
+            }
+        }
+
+        stage('Smoke Test') {
+            steps {
+                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
+                    script {
+                        def portMap = [
+                            dev : env.DEV_NODE_PORT,
+                            test: env.TEST_NODE_PORT,
+                            uat : env.UAT_NODE_PORT,
+                            prod: env.PROD_NODE_PORT
+                        ]
+                        retryWithDelay(env.RETRY_COUNT.toInteger(), env.RETRY_DELAY_SEC.toInteger(), 'Smoke Test') {
+                            smokeTest("multi-env-${params.ENVIRONMENT}", portMap[params.ENVIRONMENT])
+                        }
+                    }
+                }
+            }
+            post {
+                failure { echo "Smoke Test failed — multi-env-${params.ENVIRONMENT} may be unhealthy. Investigate pod status." }
+            }
+        }
+    }
+
+    post {
+        success { echo "Version ${params.VERSION_TAG} successfully deployed to ${params.ENVIRONMENT}." }
+        failure { echo "Targeted deploy failed. Environment: ${params.ENVIRONMENT}, Version: ${params.VERSION_TAG}." }
+    }
+}
