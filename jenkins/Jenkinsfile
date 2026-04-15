@@ -1,350 +1,294 @@
 // CD pipeline: deploy dev → test → uat → prod with Apinizer sync and smoke tests.
-// Shared library functions (retryWithDelay, apinizerProxySync, smokeTest) must be
+// Shared library functions (retryWithDelay, apinizerProxySync, apinizerPromoteProd, smokeTest) must be
 // configured under Jenkins → Manage Jenkins → Global Pipeline Libraries.
 
 pipeline {
-  agent any
+    agent any
 
-  parameters {
-    string(
-      name: 'VERSION_TAG',
-      defaultValue: '',
-      description: 'Semantic version tag pushed by CI (e.g. v1.2.3). Must not be empty.'
-    )
-  }
-
-  environment {
-    IMAGE_BASE = 'apinizeren/multi-env'
-    NODE_IP = '167.86.118.166'
-    DEV_NODE_PORT = '30221'
-    TEST_NODE_PORT = '30222'
-    UAT_NODE_PORT = '30223'
-    PROD_NODE_PORT = '30224'
-
-    APINIZER_URL = credentials('apinizer-management-url')
-    APINIZER_TOKEN = credentials('APINIZER_DEMO_TOKEN')
-    PROXY_NAME = 'multi-env'
-
-    PROJECT_NAME_DEV = 'dev-project'
-    PROJECT_NAME_TEST = 'test-project'
-    PROJECT_NAME_UAT = 'uat-project'
-    PROJECT_NAME_PROD = 'prod-project'
-
-    OPENAPI_URL_DEV = "http://${NODE_IP}:${DEV_NODE_PORT}/openapi.json"
-    OPENAPI_URL_TEST = "http://${NODE_IP}:${TEST_NODE_PORT}/openapi.json"
-    OPENAPI_URL_UAT = "http://${NODE_IP}:${UAT_NODE_PORT}/openapi.json"
-    OPENAPI_URL_PROD = "http://${NODE_IP}:${PROD_NODE_PORT}/openapi.json"
-
-    RETRY_COUNT = '3'
-    RETRY_DELAY_SEC = '15'
-  }
-
-  stages {
-
-    stage('Validate Parameters') {
-      steps {
-        script {
-          if (!params.VERSION_TAG?.trim()) {
-            error('VERSION_TAG parameter is empty. Pipeline must be triggered with a valid semantic version tag (e.g. v1.2.3).')
-          }
-          echo "Starting deployment for version: ${params.VERSION_TAG}"
-        }
-      }
+    parameters {
+        string(
+            name: 'VERSION_TAG',
+            defaultValue: '',
+            description: 'Semantic version tag pushed by CI (e.g. v1.2.3). Must not be empty.'
+        )
     }
 
-    stage('Checkout') {
-      steps {
-        checkout scm
-      }
+    environment {
+        IMAGE_BASE        = 'apinizeren/multi-env'
+        NODE_IP           = '167.86.118.166'
+        DEV_NODE_PORT     = '30221'
+        TEST_NODE_PORT    = '30222'
+        UAT_NODE_PORT     = '30223'
+        PROD_NODE_PORT    = '30224'
+
+        APINIZER_URL      = credentials('apinizer-management-url')
+        APINIZER_TOKEN    = credentials('APINIZER_DEMO_TOKEN')
+        PROXY_NAME        = 'multi-env'
+
+        PROJECT_NAME_DEV  = 'dev-project'
+        PROJECT_NAME_TEST = 'test-project'
+        PROJECT_NAME_UAT  = 'uat-project'
+        PROJECT_NAME_PROD = 'prod-project'
+
+        OPENAPI_URL_DEV   = "http://${NODE_IP}:${DEV_NODE_PORT}/openapi.json"
+        OPENAPI_URL_TEST  = "http://${NODE_IP}:${TEST_NODE_PORT}/openapi.json"
+        OPENAPI_URL_UAT   = "http://${NODE_IP}:${UAT_NODE_PORT}/openapi.json"
+        OPENAPI_URL_PROD  = "http://${NODE_IP}:${PROD_NODE_PORT}/openapi.json"
+
+        RETRY_COUNT       = '3'
+        RETRY_DELAY_SEC   = '15'
     }
 
-    // ── DEV ──────────────────────────────────────────────────────────────
+    stages {
 
-    stage('Deploy Dev') {
-      steps {
-        withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
-          sh ""
-          "
-          export KUBECONFIG = \$KUBECONFIG
-          cd k8s / overlays / dev
-          kustomize edit set image $ {
-            IMAGE_BASE
-          } = $ {
-            IMAGE_BASE
-          }: $ {
-            params.VERSION_TAG
-          }
-          kubectl apply - k.
-          kubectl rollout status deployment / multi - env - api - n multi - env - dev--timeout = 120 s ""
-          "
-        }
-      }
-      post {
-        failure {
-          echo "Deploy Dev failed for version ${params.VERSION_TAG}. Check kubectl output above."
-        }
-      }
-    }
-
-    stage('Apinizer Sync Dev') {
-      steps {
-        script {
-          retryWithDelay(env.RETRY_COUNT.toInteger(), env.RETRY_DELAY_SEC.toInteger(), 'Apinizer Sync Dev') {
-            apinizerProxySync(
-              proxyName: env.PROXY_NAME,
-              projectName: env.PROJECT_NAME_DEV,
-              openApiUrl: env.OPENAPI_URL_DEV,
-              environment: 'dev',
-              versionTag: params.VERSION_TAG
-            )
-          }
-        }
-      }
-      post {
-        failure {
-          echo "Apinizer Sync Dev failed. Proxy may be out of sync with deployed version ${params.VERSION_TAG}."
-        }
-      }
-    }
-
-    stage('Smoke Test Dev') {
-      steps {
-        withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
-          script {
-            retryWithDelay(env.RETRY_COUNT.toInteger(), env.RETRY_DELAY_SEC.toInteger(), 'Smoke Test Dev') {
-              smokeTest('multi-env-dev', env.DEV_NODE_PORT)
+        stage('Validate Parameters') {
+            steps {
+                script {
+                    if (!params.VERSION_TAG?.trim()) {
+                        error('VERSION_TAG parameter is empty. Pipeline must be triggered with a valid semantic version tag (e.g. v1.2.3).')
+                    }
+                    echo "Starting deployment for version: ${params.VERSION_TAG}"
+                }
             }
-          }
         }
-      }
-      post {
-        failure {
-          echo "Smoke Test Dev failed — pipeline stopped. Investigate pod status in namespace multi-env-dev."
-        }
-      }
-    }
 
-    stage('Approve Test') {
-      steps {
-        input message: "Deploy to TEST environment?\n\nVersion: ${params.VERSION_TAG}", ok: 'Proceed'
-      }
-    }
-
-    // ── TEST ─────────────────────────────────────────────────────────────
-
-    stage('Deploy Test') {
-      steps {
-        withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
-          sh ""
-          "
-          export KUBECONFIG = \$KUBECONFIG
-          cd k8s / overlays / test
-          kustomize edit set image $ {
-            IMAGE_BASE
-          } = $ {
-            IMAGE_BASE
-          }: $ {
-            params.VERSION_TAG
-          }
-          kubectl apply - k.
-          kubectl rollout status deployment / multi - env - api - n multi - env - test--timeout = 120 s ""
-          "
-        }
-      }
-      post {
-        failure {
-          echo "Deploy Test failed for version ${params.VERSION_TAG}. Check kubectl output above."
-        }
-      }
-    }
-
-    stage('Apinizer Sync Test') {
-      steps {
-        script {
-          retryWithDelay(env.RETRY_COUNT.toInteger(), env.RETRY_DELAY_SEC.toInteger(), 'Apinizer Sync Test') {
-            apinizerProxySync(
-              proxyName: env.PROXY_NAME,
-              projectName: env.PROJECT_NAME_TEST,
-              openApiUrl: env.OPENAPI_URL_TEST,
-              environment: 'test',
-              versionTag: params.VERSION_TAG
-            )
-          }
-        }
-      }
-      post {
-        failure {
-          echo "Apinizer Sync Test failed. Proxy may be out of sync with deployed version ${params.VERSION_TAG}."
-        }
-      }
-    }
-
-    stage('Smoke Test Test') {
-      steps {
-        withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
-          script {
-            retryWithDelay(env.RETRY_COUNT.toInteger(), env.RETRY_DELAY_SEC.toInteger(), 'Smoke Test Test') {
-              smokeTest('multi-env-test', env.TEST_NODE_PORT)
+        stage('Checkout') {
+            steps {
+                checkout scm
             }
-          }
         }
-      }
-      post {
-        failure {
-          echo "Smoke Test Test failed — pipeline stopped. Investigate pod status in namespace multi-env-test."
-        }
-      }
-    }
 
-    stage('Approve UAT') {
-      steps {
-        input message: "Deploy to UAT environment?\n\nVersion: ${params.VERSION_TAG}", ok: 'Proceed'
-      }
-    }
+        // ── DEV ──────────────────────────────────────────────────────────────
 
-    // ── UAT ──────────────────────────────────────────────────────────────
-
-    stage('Deploy UAT') {
-      steps {
-        withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
-          sh ""
-          "
-          export KUBECONFIG = \$KUBECONFIG
-          cd k8s / overlays / uat
-          kustomize edit set image $ {
-            IMAGE_BASE
-          } = $ {
-            IMAGE_BASE
-          }: $ {
-            params.VERSION_TAG
-          }
-          kubectl apply - k.
-          kubectl rollout status deployment / multi - env - api - n multi - env - uat--timeout = 120 s ""
-          "
-        }
-      }
-      post {
-        failure {
-          echo "Deploy UAT failed for version ${params.VERSION_TAG}. Check kubectl output above."
-        }
-      }
-    }
-
-    stage('Apinizer Sync UAT') {
-      steps {
-        script {
-          retryWithDelay(env.RETRY_COUNT.toInteger(), env.RETRY_DELAY_SEC.toInteger(), 'Apinizer Sync UAT') {
-            apinizerProxySync(
-              proxyName: env.PROXY_NAME,
-              projectName: env.PROJECT_NAME_UAT,
-              openApiUrl: env.OPENAPI_URL_UAT,
-              environment: 'uat',
-              versionTag: params.VERSION_TAG
-            )
-          }
-        }
-      }
-      post {
-        failure {
-          echo "Apinizer Sync UAT failed. Proxy may be out of sync with deployed version ${params.VERSION_TAG}."
-        }
-      }
-    }
-
-    stage('Smoke Test UAT') {
-      steps {
-        withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
-          script {
-            retryWithDelay(env.RETRY_COUNT.toInteger(), env.RETRY_DELAY_SEC.toInteger(), 'Smoke Test UAT') {
-              smokeTest('multi-env-uat', env.UAT_NODE_PORT)
+        stage('Deploy Dev') {
+            steps {
+                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
+                    sh """
+                        export KUBECONFIG=\$KUBECONFIG
+                        cd k8s/overlays/dev
+                        kustomize edit set image ${IMAGE_BASE}=${IMAGE_BASE}:${params.VERSION_TAG}
+                        kubectl apply -k .
+                        kubectl rollout status deployment/multi-env-api -n multi-env-dev --timeout=120s
+                    """
+                }
             }
-          }
-        }
-      }
-      post {
-        failure {
-          echo "Smoke Test UAT failed — pipeline stopped. Investigate pod status in namespace multi-env-uat."
-        }
-      }
-    }
-
-    stage('Approve Prod') {
-      steps {
-        input message: "Promote to PRODUCTION environment?\n\nVersion: ${params.VERSION_TAG}\n\nThis action will affect live traffic.", ok: 'Proceed'
-      }
-    }
-
-    // ── PROD ─────────────────────────────────────────────────────────────
-
-    stage('Deploy Prod') {
-      steps {
-        withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
-          sh ""
-          "
-          export KUBECONFIG = \$KUBECONFIG
-          cd k8s / overlays / prod
-          kustomize edit set image $ {
-            IMAGE_BASE
-          } = $ {
-            IMAGE_BASE
-          }: $ {
-            params.VERSION_TAG
-          }
-          kubectl apply - k.
-          kubectl rollout status deployment / multi - env - api - n multi - env - prod--timeout = 120 s ""
-          "
-        }
-      }
-      post {
-        failure {
-          echo "Deploy Prod failed for version ${params.VERSION_TAG}. Check kubectl output above."
-        }
-      }
-    }
-
-    stage('Apinizer Promote Prod') {
-      steps {
-        script {
-          retryWithDelay(env.RETRY_COUNT.toInteger(), env.RETRY_DELAY_SEC.toInteger(), 'Apinizer Promote Prod') {
-            apinizerPromoteProd(
-              mappingNames: ['messagingapi'],
-              executionName: "v-${params.VERSION_TAG}",
-              executionDescription: "API Proxy promotion from UAT to Production environment - ${params.VERSION_TAG}"
-            )
-          }
-        }
-      }
-      post {
-        failure {
-          echo "Apinizer Promote Prod failed. Prod proxy may not be updated to version ${params.VERSION_TAG}."
-        }
-      }
-    }
-
-    stage('Smoke Test Prod') {
-      steps {
-        withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
-          script {
-            retryWithDelay(env.RETRY_COUNT.toInteger(), env.RETRY_DELAY_SEC.toInteger(), 'Smoke Test Prod') {
-              smokeTest('multi-env-prod', env.PROD_NODE_PORT)
+            post {
+                failure { echo "Deploy Dev failed for version ${params.VERSION_TAG}. Check kubectl output above." }
             }
-          }
         }
-      }
-      post {
-        failure {
-          echo "Smoke Test Prod failed — production deployment may be unhealthy. Investigate immediately in namespace multi-env-prod."
-        }
-      }
-    }
-  }
 
-  post {
-    success {
-      echo "Pipeline completed successfully. Version ${params.VERSION_TAG} is live in production."
+        stage('Apinizer Sync Dev') {
+            steps {
+                script {
+                    retryWithDelay(env.RETRY_COUNT.toInteger(), env.RETRY_DELAY_SEC.toInteger(), 'Apinizer Sync Dev') {
+                        apinizerProxySync(
+                            proxyName:   env.PROXY_NAME,
+                            projectName: env.PROJECT_NAME_DEV,
+                            openApiUrl:  env.OPENAPI_URL_DEV,
+                            environment: 'dev',
+                            versionTag:  params.VERSION_TAG
+                        )
+                    }
+                }
+            }
+            post {
+                failure { echo "Apinizer Sync Dev failed. Proxy may be out of sync with deployed version ${params.VERSION_TAG}." }
+            }
+        }
+
+        stage('Smoke Test Dev') {
+            steps {
+                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
+                    script {
+                        retryWithDelay(env.RETRY_COUNT.toInteger(), env.RETRY_DELAY_SEC.toInteger(), 'Smoke Test Dev') {
+                            smokeTest('multi-env-dev', env.DEV_NODE_PORT)
+                        }
+                    }
+                }
+            }
+            post {
+                failure { echo "Smoke Test Dev failed — pipeline stopped. Investigate pod status in namespace multi-env-dev." }
+            }
+        }
+
+        stage('Approve Test') {
+            steps {
+                input message: "Deploy to TEST environment?\n\nVersion: ${params.VERSION_TAG}", ok: 'Proceed'
+            }
+        }
+
+        // ── TEST ─────────────────────────────────────────────────────────────
+
+        stage('Deploy Test') {
+            steps {
+                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
+                    sh """
+                        export KUBECONFIG=\$KUBECONFIG
+                        cd k8s/overlays/test
+                        kustomize edit set image ${IMAGE_BASE}=${IMAGE_BASE}:${params.VERSION_TAG}
+                        kubectl apply -k .
+                        kubectl rollout status deployment/multi-env-api -n multi-env-test --timeout=120s
+                    """
+                }
+            }
+            post {
+                failure { echo "Deploy Test failed for version ${params.VERSION_TAG}. Check kubectl output above." }
+            }
+        }
+
+        stage('Apinizer Sync Test') {
+            steps {
+                script {
+                    retryWithDelay(env.RETRY_COUNT.toInteger(), env.RETRY_DELAY_SEC.toInteger(), 'Apinizer Sync Test') {
+                        apinizerProxySync(
+                            proxyName:   env.PROXY_NAME,
+                            projectName: env.PROJECT_NAME_TEST,
+                            openApiUrl:  env.OPENAPI_URL_TEST,
+                            environment: 'test',
+                            versionTag:  params.VERSION_TAG
+                        )
+                    }
+                }
+            }
+            post {
+                failure { echo "Apinizer Sync Test failed. Proxy may be out of sync with deployed version ${params.VERSION_TAG}." }
+            }
+        }
+
+        stage('Smoke Test Test') {
+            steps {
+                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
+                    script {
+                        retryWithDelay(env.RETRY_COUNT.toInteger(), env.RETRY_DELAY_SEC.toInteger(), 'Smoke Test Test') {
+                            smokeTest('multi-env-test', env.TEST_NODE_PORT)
+                        }
+                    }
+                }
+            }
+            post {
+                failure { echo "Smoke Test Test failed — pipeline stopped. Investigate pod status in namespace multi-env-test." }
+            }
+        }
+
+        stage('Approve UAT') {
+            steps {
+                input message: "Deploy to UAT environment?\n\nVersion: ${params.VERSION_TAG}", ok: 'Proceed'
+            }
+        }
+
+        // ── UAT ──────────────────────────────────────────────────────────────
+
+        stage('Deploy UAT') {
+            steps {
+                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
+                    sh """
+                        export KUBECONFIG=\$KUBECONFIG
+                        cd k8s/overlays/uat
+                        kustomize edit set image ${IMAGE_BASE}=${IMAGE_BASE}:${params.VERSION_TAG}
+                        kubectl apply -k .
+                        kubectl rollout status deployment/multi-env-api -n multi-env-uat --timeout=120s
+                    """
+                }
+            }
+            post {
+                failure { echo "Deploy UAT failed for version ${params.VERSION_TAG}. Check kubectl output above." }
+            }
+        }
+
+        stage('Apinizer Sync UAT') {
+            steps {
+                script {
+                    retryWithDelay(env.RETRY_COUNT.toInteger(), env.RETRY_DELAY_SEC.toInteger(), 'Apinizer Sync UAT') {
+                        apinizerProxySync(
+                            proxyName:   env.PROXY_NAME,
+                            projectName: env.PROJECT_NAME_UAT,
+                            openApiUrl:  env.OPENAPI_URL_UAT,
+                            environment: 'uat',
+                            versionTag:  params.VERSION_TAG
+                        )
+                    }
+                }
+            }
+            post {
+                failure { echo "Apinizer Sync UAT failed. Proxy may be out of sync with deployed version ${params.VERSION_TAG}." }
+            }
+        }
+
+        stage('Smoke Test UAT') {
+            steps {
+                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
+                    script {
+                        retryWithDelay(env.RETRY_COUNT.toInteger(), env.RETRY_DELAY_SEC.toInteger(), 'Smoke Test UAT') {
+                            smokeTest('multi-env-uat', env.UAT_NODE_PORT)
+                        }
+                    }
+                }
+            }
+            post {
+                failure { echo "Smoke Test UAT failed — pipeline stopped. Investigate pod status in namespace multi-env-uat." }
+            }
+        }
+
+        stage('Approve Prod') {
+            steps {
+                input message: "Promote to PRODUCTION environment?\n\nVersion: ${params.VERSION_TAG}\n\nThis action will affect live traffic.", ok: 'Proceed'
+            }
+        }
+
+        // ── PROD ─────────────────────────────────────────────────────────────
+
+        stage('Deploy Prod') {
+            steps {
+                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
+                    sh """
+                        export KUBECONFIG=\$KUBECONFIG
+                        cd k8s/overlays/prod
+                        kustomize edit set image ${IMAGE_BASE}=${IMAGE_BASE}:${params.VERSION_TAG}
+                        kubectl apply -k .
+                        kubectl rollout status deployment/multi-env-api -n multi-env-prod --timeout=120s
+                    """
+                }
+            }
+            post {
+                failure { echo "Deploy Prod failed for version ${params.VERSION_TAG}. Check kubectl output above." }
+            }
+        }
+
+        stage('Apinizer Promote Prod') {
+            steps {
+                script {
+                    retryWithDelay(env.RETRY_COUNT.toInteger(), env.RETRY_DELAY_SEC.toInteger(), 'Apinizer Promote Prod') {
+                        apinizerPromoteProd(
+                            mappingNames:         ['messagingapi'],
+                            executionName:        "v-${params.VERSION_TAG}",
+                            executionDescription: "API Proxy promotion from UAT to Production - ${params.VERSION_TAG}"
+                        )
+                    }
+                }
+            }
+            post {
+                failure { echo "Apinizer Promote Prod failed. Prod proxy may not be updated to version ${params.VERSION_TAG}." }
+            }
+        }
+
+        stage('Smoke Test Prod') {
+            steps {
+                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
+                    script {
+                        retryWithDelay(env.RETRY_COUNT.toInteger(), env.RETRY_DELAY_SEC.toInteger(), 'Smoke Test Prod') {
+                            smokeTest('multi-env-prod', env.PROD_NODE_PORT)
+                        }
+                    }
+                }
+            }
+            post {
+                failure { echo "Smoke Test Prod failed — production deployment may be unhealthy. Investigate immediately in namespace multi-env-prod." }
+            }
+        }
     }
-    failure {
-      echo "Pipeline failed. Review stage logs above to identify the failure point."
+
+    post {
+        success { echo "Pipeline completed successfully. Version ${params.VERSION_TAG} is live in production." }
+        failure { echo "Pipeline failed. Review stage logs above to identify the failure point." }
     }
-  }
 }
