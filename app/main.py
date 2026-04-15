@@ -58,3 +58,7 @@ def info():
 def health():
     """Liveness probe endpoint — returns 200 when the service is running."""
     return {"status": "ok"}
+
+@app.get("/test")
+def test():
+    return {"status": "test"}
