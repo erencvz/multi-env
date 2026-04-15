@@ -66,3 +66,7 @@ def test():
 @app.get("/test2")
 def test2():
     return {"status": "test2"}
+
+@app.get("/test3")
+def test3():
+    return {"status": "test3"}
