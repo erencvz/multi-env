@@ -1,0 +1,12 @@
+# Base Kubernetes Service manifest — NodePort type; nodePort value is set per overlay.
+apiVersion: v1
+kind: Service
+metadata:
+  name: multi-env-api
+spec:
+  type: NodePort
+  selector:
+    app: multi-env-api
+  ports:
+    - port: 8000
+      targetPort: 8000

@@ -1,0 +1,18 @@
+# Argo CD Application manifest for the test environment — manual sync for targeted deploys.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: multi-env-test
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/erencvz/multi-env.git
+    targetRevision: HEAD
+    path: k8s/overlays/test
+  destination:
+    server: https://167.86.118.166:6443
+    namespace: multi-env-test
+  syncPolicy:
+    syncOptions:
+      - CreateNamespace=true

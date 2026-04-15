@@ -1,0 +1,28 @@
+# Base Kubernetes Deployment manifest — shared across all environments via Kustomize overlays.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: multi-env-api
+  labels:
+    app: multi-env-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: multi-env-api
+  template:
+    metadata:
+      labels:
+        app: multi-env-api
+    spec:
+      containers:
+        - name: multi-env
+          image: apinizeren/multi-env:latest
+          ports:
+            - containerPort: 8000
+          env:
+            - name: ENVIRONMENT
+              valueFrom:
+                configMapKeyRef:
+                  name: multi-env-api-env
+                  key: ENVIRONMENT

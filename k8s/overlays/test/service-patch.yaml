@@ -1,0 +1,10 @@
+# NodePort service patch for the test environment.
+apiVersion: v1
+kind: Service
+metadata:
+  name: multi-env-api
+spec:
+  ports:
+    - port: 8000
+      targetPort: 8000
+      nodePort: 30222

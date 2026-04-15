@@ -1,0 +1,7 @@
+# Base Kustomize configuration — referenced by all environment overlays.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - deployment.yaml
+  - service.yaml
